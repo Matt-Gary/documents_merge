@@ -187,7 +187,7 @@ class FileRow(tk.Frame):
 class PreviewTable(tk.Frame):
     """Scrollable table showing rows that will be imported."""
 
-    COLS = ("Destino", "Data de Emissão", "Histórico da Despesa/Receita", "Valor (R$)", "Arquivo")
+    COLS = ("Destino", "Data de Emissão", "Histórico da Despesa/Receita", "Classificação", "Valor (R$)", "Arquivo")
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, bg=CARD, **kwargs)
@@ -195,8 +195,8 @@ class PreviewTable(tk.Frame):
         # header
         hdr = tk.Frame(self, bg=HEADER_BG)
         hdr.pack(fill="x")
-        col_weights = [1, 1, 4, 1, 2]
-        col_minsizes = [70, 90, 200, 110, 120]
+        col_weights = [1, 1, 4, 1, 1, 2]
+        col_minsizes = [70, 90, 200, 100, 110, 120]
         for i, (col, w, ms) in enumerate(zip(self.COLS, col_weights, col_minsizes)):
             tk.Label(
                 hdr,
@@ -259,8 +259,14 @@ class PreviewTable(tk.Frame):
             tk.Label(
                 self.body, text=row["historico"], bg=bg, fg=TEXT,
                 font=("Segoe UI", 9), anchor="w", padx=8,
-                wraplength=350,
+                wraplength=250,
             ).grid(row=i, column=2, sticky="ew")
+
+            classificacao = row.get("classificacao", "")
+            tk.Label(
+                self.body, text=classificacao, bg=bg, fg=PRIMARY if classificacao else SUBTEXT,
+                font=("Segoe UI", 8, "bold" if classificacao else "normal"), anchor="w", padx=8,
+            ).grid(row=i, column=3, sticky="ew")
 
             val = row["valor"]
             val_color = DANGER if isinstance(val, (int, float)) and val < 0 else SUCCESS
@@ -269,7 +275,7 @@ class PreviewTable(tk.Frame):
                 text=f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".") if isinstance(val, (int, float)) else str(val),
                 bg=bg, fg=val_color,
                 font=("Segoe UI", 9, "bold"), anchor="e", padx=8,
-            ).grid(row=i, column=3, sticky="ew")
+            ).grid(row=i, column=4, sticky="ew")
 
             source = row.get("source", "")
             if len(source) > 22:
@@ -277,13 +283,14 @@ class PreviewTable(tk.Frame):
             tk.Label(
                 self.body, text=source, bg=bg, fg=SUBTEXT,
                 font=("Segoe UI", 8), anchor="w", padx=8,
-            ).grid(row=i, column=4, sticky="ew")
+            ).grid(row=i, column=5, sticky="ew")
 
         self.body.columnconfigure(0, weight=1, minsize=70)
         self.body.columnconfigure(1, weight=1, minsize=90)
         self.body.columnconfigure(2, weight=4, minsize=200)
-        self.body.columnconfigure(3, weight=1, minsize=110)
-        self.body.columnconfigure(4, weight=2, minsize=120)
+        self.body.columnconfigure(3, weight=1, minsize=100)
+        self.body.columnconfigure(4, weight=1, minsize=110)
+        self.body.columnconfigure(5, weight=2, minsize=120)
 
 
 class App(tk.Tk):
@@ -544,6 +551,13 @@ class App(tk.Tk):
                         filepath, source_type, sheet_target, api_key=api_key
                     )
                     all_rows.extend(rows)
+                
+                if all_rows:
+                    self.after(0, lambda: self._set_status("🏷️  Classificando lançamentos com IA...", color=PRIMARY))
+                    categories = engine.fetch_categories()
+                    from ai_mapper import classify_transactions
+                    all_rows = classify_transactions(all_rows, categories, api_key)
+
                 self.after(0, lambda r=all_rows: self._on_preview_success(r))
             except Exception as e:
                 msg = str(e)

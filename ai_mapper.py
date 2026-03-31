@@ -158,3 +158,88 @@ def extract_with_ai(filepath: Path, api_key: str) -> list[dict]:
         })
 
     return result
+
+
+# ─────────────────────────── CLASSIFICATION ─────────────────────────────────
+
+_CLASSIFY_SYSTEM = (
+    "You are a financial transaction classifier for a Brazilian company. "
+    "Return only valid JSON, no explanation."
+)
+
+
+def classify_transactions(
+    rows: list[dict],
+    categories_by_sheet: dict,
+    api_key: str,
+) -> list[dict]:
+    """
+    Classify all transactions in a single OpenAI call.
+    categories_by_sheet = {"DESPESAS": [...], "RECEITAS": [...]}
+    Adds "classificacao" key to each row (empty string if no match).
+    """
+    if not _OPENAI_AVAILABLE or not rows:
+        for row in rows:
+            row.setdefault("classificacao", "")
+        return rows
+
+    despesas_cats = categories_by_sheet.get("DESPESAS", [])
+    receitas_cats  = categories_by_sheet.get("RECEITAS", [])
+
+    if not despesas_cats and not receitas_cats:
+        for row in rows:
+            row.setdefault("classificacao", "")
+        return rows
+
+    tx_lines = [
+        f'{i}: [{row["sheet"]}] {row["historico"]}'
+        for i, row in enumerate(rows)
+    ]
+
+    prompt = (
+        "Classify each transaction below into one category from the provided lists.\n\n"
+        f"DESPESAS categories:\n{json.dumps(despesas_cats, ensure_ascii=False)}\n\n"
+        f"RECEITAS categories:\n{json.dumps(receitas_cats, ensure_ascii=False)}\n\n"
+        "Transactions (format: \"index: [TYPE] description\"):\n"
+        + "\n".join(tx_lines)
+        + "\n\nRules:\n"
+        "- DESPESAS transactions → choose from DESPESAS list only\n"
+        "- RECEITAS transactions → choose from RECEITAS list only\n"
+        '- If no category fits, use ""\n'
+        "- Return ONLY this JSON:\n"
+        '{"classifications": [{"index": 0, "classificacao": "Category Name"}, ...]}'
+    )
+
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": _CLASSIFY_SYSTEM},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(response.choices[0].message.content)
+        index_map = {
+            item["index"]: item.get("classificacao", "")
+            for item in data.get("classifications", [])
+        }
+
+        valid_despesas = set(despesas_cats)
+        valid_receitas  = set(receitas_cats)
+
+        for i, row in enumerate(rows):
+            cat = index_map.get(i, "")
+            valid_set = valid_despesas if row["sheet"] == "DESPESAS" else valid_receitas
+            if cat and valid_set and cat not in valid_set:
+                cat = ""
+            row["classificacao"] = cat
+
+    except Exception as exc:
+        print(f"[CLASSIFY WARNING] {exc}")
+        for row in rows:
+            row.setdefault("classificacao", "")
+
+    return rows

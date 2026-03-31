@@ -334,6 +334,39 @@ class DREEngine:
             r["source"] = filepath.name
         return rows
 
+    def fetch_categories(self) -> dict:
+        """
+        Read CLASSIFICAÇÃO categories from the *Lista* tab of the DRE spreadsheet.
+        Returns {"DESPESAS": [...], "RECEITAS": [...]}
+        Falls back to empty lists on any error so the rest of the import is unaffected.
+        """
+        try:
+            import gspread
+        except ImportError:
+            return {"DESPESAS": [], "RECEITAS": []}
+
+        if not CREDENTIALS_FILE.exists():
+            return {"DESPESAS": [], "RECEITAS": []}
+
+        try:
+            gc = gspread.service_account(filename=str(CREDENTIALS_FILE))
+            sh = gc.open_by_key(GDRIVE_DRE_ID)
+            lista = sh.worksheet("*Lista*")
+
+            # Column B → DESPESAS categories (row 2 onwards; row 1 is header)
+            col_b = lista.col_values(2)
+            despesas = [v.strip() for v in col_b[1:] if v and v.strip()]
+
+            # Column D → RECEITAS categories (row 2 onwards; row 1 is header)
+            col_d = lista.col_values(4)
+            receitas = [v.strip() for v in col_d[1:] if v and v.strip()]
+
+            return {"DESPESAS": despesas, "RECEITAS": receitas}
+
+        except Exception as exc:
+            print(f"[CATEGORIES WARNING] {exc}")
+            return {"DESPESAS": [], "RECEITAS": []}
+
     def write_to_dre(self, rows: list[dict]) -> int:
         """
         Append rows to the DRE Google Sheets spreadsheet.
@@ -403,7 +436,7 @@ class DREEngine:
             values = []
             for r in sheet_rows:
                 date_str = r["data"].strftime("%d/%m/%Y") if hasattr(r["data"], "strftime") else str(r["data"])
-                values.append([date_str, r["historico"], "", r["valor"]])
+                values.append([date_str, r["historico"], r.get("classificacao", ""), r["valor"]])
 
             ws.update(
                 range_name=f"A{first_target_row}:D{target_last}",
