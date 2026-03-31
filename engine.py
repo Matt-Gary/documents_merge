@@ -11,7 +11,9 @@ import openpyxl
 from openpyxl import load_workbook
 
 # ─── Google Sheets target ────────────────────────────────────────────────────
+# ─── Google Sheets target ────────────────────────────────────────────────────
 GDRIVE_DRE_ID = "1nfETgiPN5pNrcIDDiklG5yptL6ltyE8kYOfUbjRl2zM"
+GDRIVE_MEMORY_ID = "1jwkR_PEFWqDJYzIWb1wh5joUejL3t_mRXrLb9bBg8m4"
 CREDENTIALS_FILE = Path(__file__).parent / "spreadsheetexport-490117-f905b0cadf9e.json"
 GSHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -366,6 +368,73 @@ class DREEngine:
         except Exception as exc:
             print(f"[CATEGORIES WARNING] {exc}")
             return {"DESPESAS": [], "RECEITAS": []}
+
+    def fetch_memory_rules(self) -> dict:
+        """
+        Fetch historical learned rules from the memory spreadsheet.
+        Returns {"DESPESAS": {"desc": "Cat", ...}, "RECEITAS": {"desc": "Cat", ...}}
+        """
+        try:
+            import gspread
+        except ImportError:
+            return {"DESPESAS": {}, "RECEITAS": {}}
+
+        if not CREDENTIALS_FILE.exists():
+            return {"DESPESAS": {}, "RECEITAS": {}}
+
+        memory = {"DESPESAS": {}, "RECEITAS": {}}
+        try:
+            gc = gspread.service_account(filename=str(CREDENTIALS_FILE))
+            sh = gc.open_by_key(GDRIVE_MEMORY_ID)
+            
+            # Use the first sheet. If it doesn't exist, we'll get an error, but that's fine.
+            # We assume columns: A=Historico, B=Classificacao, C=SheetType (DESPESAS/RECEITAS)
+            ws = sh.sheet1
+            rows = ws.get_all_values()
+            
+            # Skip header if row 1 has "Historico"
+            if rows and "historico" in str(rows[0][0]).lower():
+                rows = rows[1:]
+                
+            for row in rows:
+                if len(row) >= 3:
+                    hist, cat, sheet_type = row[0].strip(), row[1].strip(), row[2].strip()
+                    if hist and cat and sheet_type in memory:
+                        memory[sheet_type][hist] = cat
+        except Exception as exc:
+            print(f"[MEMORY LOAD WARNING] {exc}")
+            
+        return memory
+
+    def save_memory_rules(self, rules: list[tuple[str, str, str]]):
+        """
+        Append new learning rules to the memory spreadsheet.
+        rules is a list of tuples: (historico, classificacao, sheet_type)
+        """
+        if not rules:
+            return
+            
+        try:
+            import gspread
+        except ImportError:
+            return
+
+        if not CREDENTIALS_FILE.exists():
+            return
+
+        try:
+            gc = gspread.service_account(filename=str(CREDENTIALS_FILE))
+            sh = gc.open_by_key(GDRIVE_MEMORY_ID)
+            ws = sh.sheet1
+            
+            # Check if empty, maybe add headers
+            if ws.row_count == 1 and not ws.cell(1, 1).value:
+                ws.update("A1:C1", [["Historico", "Classificacao", "SheetType"]])
+                
+            values_to_append = [[hist, cat, sheet_type] for hist, cat, sheet_type in rules]
+            ws.append_rows(values_to_append, value_input_option="USER_ENTERED")
+        except Exception as exc:
+            print(f"[MEMORY SAVE WARNING] {exc}")
 
     def write_to_dre(self, rows: list[dict]) -> int:
         """
