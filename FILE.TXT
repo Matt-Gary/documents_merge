@@ -1,0 +1,7 @@
+CREDS = ServiceAccountCredentials.from_json_keyfile_name('spreadsheetexport-490117-a2078404a0dc.json')
+client = gspread.authorize(CREDS)
+
+# TARGET SPREADSHEET
+SHEET_ID = '1nfETgiPN5pNrcIDDiklG5yptL6ltyE8kYOfUbjRl2zM'
+
+.\.venv\Scripts\Activate.ps1

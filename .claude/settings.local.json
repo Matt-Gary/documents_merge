@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs cat:*)",
+      "Bash(c:ProjectsSpreadsheet_export.venvScriptspip.exe list:*)",
+      "Bash(\"/c/Projects/Spreadsheet_export/.venv/Scripts/pip.exe\" list:*)",
+      "Bash(\"/c/Projects/Spreadsheet_export/.venv/Scripts/pip.exe\" install:*)",
+      "Bash(\"/c/Projects/Spreadsheet_export/.venv/Scripts/python.exe\" -c \"import ast; ast.parse\\(open\\(''c:/Projects/Spreadsheet_export/engine.py''\\).read\\(\\)\\); print\\(''engine.py OK''\\)\")",
+      "Bash(\"/c/Projects/Spreadsheet_export/.venv/Scripts/python.exe\" -c \"import ast; ast.parse\\(open\\(''c:/Projects/Spreadsheet_export/script.py''\\).read\\(\\)\\); print\\(''script.py OK''\\)\")",
+      "Bash(\"/c/Projects/Spreadsheet_export/.venv/Scripts/python.exe\" -c \"import ast; ast.parse\\(open\\(''c:/Projects/Spreadsheet_export/ai_mapper.py''\\).read\\(\\)\\); print\\(''ai_mapper.py OK''\\)\")",
+      "Bash(\"/c/Projects/Spreadsheet_export/.venv/Scripts/python.exe\" -c \"import ast; ast.parse\\(open\\(''c:/Projects/Spreadsheet_export/script.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''OK''\\)\")"
+    ]
+  }
+}
