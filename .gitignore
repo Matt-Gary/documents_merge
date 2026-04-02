@@ -3,3 +3,5 @@
 __pycache__
 *.pyc
 spreadsheetexport-490117-f905b0cadf9e.json
+.env
+.claude
