@@ -171,11 +171,13 @@ _CLASSIFY_SYSTEM = (
 def classify_transactions(
     rows: list[dict],
     categories_by_sheet: dict,
+    memory_rules: dict,
     api_key: str,
 ) -> list[dict]:
     """
     Classify all transactions in a single OpenAI call.
     categories_by_sheet = {"DESPESAS": [...], "RECEITAS": [...]}
+    memory_rules = {"DESPESAS": {"desc": "Cat"}, "RECEITAS": {"desc": "Cat"}}
     Adds "classificacao" key to each row (empty string if no match).
     """
     if not _OPENAI_AVAILABLE or not rows:
@@ -191,6 +193,21 @@ def classify_transactions(
             row.setdefault("classificacao", "")
         return rows
 
+    despesas_mem = memory_rules.get("DESPESAS", {})
+    receitas_mem = memory_rules.get("RECEITAS", {})
+    
+    mem_lines = []
+    if despesas_mem:
+        mem_lines.append("Historically past DESPESAS (Use these if description matches closely):")
+        for k, v in despesas_mem.items():
+            mem_lines.append(f'- "{k}" -> "{v}"')
+    if receitas_mem:
+        mem_lines.append("Historically past RECEITAS (Use these if description matches closely):")
+        for k, v in receitas_mem.items():
+            mem_lines.append(f'- "{k}" -> "{v}"')
+            
+    mem_prompt = "\n".join(mem_lines) + "\n\n" if mem_lines else ""
+
     tx_lines = [
         f'{i}: [{row["sheet"]}] {row["historico"]}'
         for i, row in enumerate(rows)
@@ -198,6 +215,7 @@ def classify_transactions(
 
     prompt = (
         "Classify each transaction below into one category from the provided lists.\n\n"
+        f"{mem_prompt}"
         f"DESPESAS categories:\n{json.dumps(despesas_cats, ensure_ascii=False)}\n\n"
         f"RECEITAS categories:\n{json.dumps(receitas_cats, ensure_ascii=False)}\n\n"
         "Transactions (format: \"index: [TYPE] description\"):\n"

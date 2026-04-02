@@ -237,9 +237,12 @@ class PreviewTable(tk.Frame):
 
         canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
 
-    def load(self, rows: list[dict]):
+    def load(self, rows: list[dict], categories: dict = None):
+        self.combos = []
         for widget in self.body.winfo_children():
             widget.destroy()
+
+        cat_dict = categories or {}
 
         for i, row in enumerate(rows):
             bg = ROW_ALT if i % 2 == 0 else CARD
@@ -262,11 +265,24 @@ class PreviewTable(tk.Frame):
                 wraplength=250,
             ).grid(row=i, column=2, sticky="ew")
 
+            # Save original category to track manual changes
+            if "_original_cat" not in row:
+                row["_original_cat"] = row.get("classificacao", "")
+
             classificacao = row.get("classificacao", "")
-            tk.Label(
-                self.body, text=classificacao, bg=bg, fg=PRIMARY if classificacao else SUBTEXT,
-                font=("Segoe UI", 8, "bold" if classificacao else "normal"), anchor="w", padx=8,
-            ).grid(row=i, column=3, sticky="ew")
+            
+            # Use Combobox instead of Label
+            sheet_cats = cat_dict.get(sheet, [])
+            combo = ttk.Combobox(
+                self.body,
+                values=[""] + sheet_cats,
+                font=("Segoe UI", 8),
+                width=15,
+            )
+            combo.set(classificacao)
+            combo.grid(row=i, column=3, sticky="ew", padx=8, pady=2)
+            
+            self.combos.append((row, combo))
 
             val = row["valor"]
             val_color = DANGER if isinstance(val, (int, float)) and val < 0 else SUCCESS
@@ -291,6 +307,11 @@ class PreviewTable(tk.Frame):
         self.body.columnconfigure(3, weight=1, minsize=100)
         self.body.columnconfigure(4, weight=1, minsize=110)
         self.body.columnconfigure(5, weight=2, minsize=120)
+
+    def commit_edits(self):
+        """Update row dicts with the latest combobox values."""
+        for row, combo in getattr(self, "combos", []):
+            row["classificacao"] = combo.get().strip()
 
 
 class App(tk.Tk):
@@ -555,19 +576,20 @@ class App(tk.Tk):
                 if all_rows:
                     self.after(0, lambda: self._set_status("🏷️  Classificando lançamentos com IA...", color=PRIMARY))
                     categories = engine.fetch_categories()
+                    memory = engine.fetch_memory_rules()
                     from ai_mapper import classify_transactions
-                    all_rows = classify_transactions(all_rows, categories, api_key)
+                    all_rows = classify_transactions(all_rows, categories, memory, api_key)
 
-                self.after(0, lambda r=all_rows: self._on_preview_success(r))
+                self.after(0, lambda r=all_rows, c=categories if all_rows else {}: self._on_preview_success(r, c))
             except Exception as e:
                 msg = str(e)
                 self.after(0, lambda: self._on_preview_error(msg))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _on_preview_success(self, rows: list[dict]):
+    def _on_preview_success(self, rows: list[dict], categories: dict = None):
         self.preview_data = rows
-        self.preview_table.load(self.preview_data)
+        self.preview_table.load(self.preview_data, categories)
         n = len(self.preview_data)
         self.count_label.config(text=f"({n} lançamento{'s' if n != 1 else ''})")
         self._set_status(f"{n} lançamentos prontos para importar.")
@@ -593,10 +615,28 @@ class App(tk.Tk):
         self.import_btn.config(state="disabled", text="⏳  Importando...")
         self._set_status("Importando...")
 
+        # Commit user edits from the comboboxes into self.preview_data
+        self.preview_table.commit_edits()
+
+        # Learn from manual corrections
+        rules_to_save = []
+        for r in self.preview_data:
+            new_cat = r.get("classificacao", "")
+            old_cat = r.get("_original_cat", "")
+            # Only save rule if user provided a valid category that is different from AI's initial guess
+            if new_cat and new_cat != old_cat:
+                rules_to_save.append((r["historico"], new_cat, r["sheet"]))
+
         def run():
             try:
                 engine = DREEngine()
                 inserted = engine.write_to_dre(self.preview_data)
+                
+                # Save learned rules (run sequentially since write_to_dre finished successfully)
+                if rules_to_save:
+                    self.after(0, lambda: self._set_status("🧠  Salvando aprendizados da IA...", color=PRIMARY))
+                    engine.save_memory_rules(rules_to_save)
+                    
                 self.after(0, lambda: self._on_import_success(inserted))
             except Exception as e:
                 msg = str(e)
