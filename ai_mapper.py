@@ -40,15 +40,17 @@ def _read_pdf_text(filepath: Path) -> str:
 def _read_xlsx_text(filepath: Path) -> str:
     """Convert xlsx rows to a readable text block."""
     wb = openpyxl.load_workbook(filepath, data_only=True)
-    ws = wb.worksheets[0]
-    lines = []
-    for row in ws.iter_rows(values_only=True):
-        cells = [str(c) if c is not None else "" for c in row]
-        line = " | ".join(cells).strip(" |")
-        if line:
-            lines.append(line)
-    wb.close()
-    return "\n".join(lines)
+    try:
+        ws = wb.worksheets[0]
+        lines = []
+        for row in ws.iter_rows(values_only=True):
+            cells = [str(c) if c is not None else "" for c in row]
+            line = " | ".join(cells).strip(" |")
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+    finally:
+        wb.close()
 
 
 # ─────────────────────────── AI EXTRACTION ───────────────────────────────────
@@ -81,15 +83,31 @@ Bank statement:
 {content}"""
 
 
-def _call_openai(content: str, api_key: str) -> list[dict]:
+class AITruncationWarning(UserWarning):
+    """Raised when document content is truncated before sending to OpenAI."""
+    pass
+
+
+_CONTENT_CHAR_LIMIT = 12_000
+
+
+def _call_openai(content: str, api_key: str) -> tuple[list[dict], str | None]:
+    """Returns (transactions, warning_message_or_None)."""
     if not _OPENAI_AVAILABLE:
         raise RuntimeError("openai não instalado. Execute: pip install openai")
 
+    if not api_key or not api_key.strip():
+        raise ValueError("OpenAI API Key não informada. Preencha a variável OPENAI_API no arquivo .env.")
+
     client = OpenAI(api_key=api_key)
 
-    # Trim content if very long (keep ~12000 chars to stay within token limits)
-    if len(content) > 12000:
-        content = content[:12000] + "\n... [truncated]"
+    truncation_warning = None
+    if len(content) > _CONTENT_CHAR_LIMIT:
+        truncation_warning = (
+            f"Conteúdo truncado de {len(content)} para {_CONTENT_CHAR_LIMIT} caracteres. "
+            "Algumas transações podem não ter sido extraídas."
+        )
+        content = content[:_CONTENT_CHAR_LIMIT] + "\n... [truncated]"
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -99,10 +117,17 @@ def _call_openai(content: str, api_key: str) -> list[dict]:
         ],
         temperature=0,
         response_format={"type": "json_object"},
+        timeout=180,
     )
 
-    data = json.loads(response.choices[0].message.content)
-    return data.get("transactions", [])
+    raw = response.choices[0].message.content
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeError(
+            f"OpenAI retornou JSON inválido na extração.\nErro: {exc}\nResposta: {raw[:500]}"
+        )
+    return data.get("transactions", []), truncation_warning
 
 
 # ─────────────────────────── MAIN ENTRY ──────────────────────────────────────
@@ -125,7 +150,7 @@ def extract_with_ai(filepath: Path, api_key: str) -> list[dict]:
     if not content.strip():
         raise ValueError("Nenhum texto encontrado no arquivo.")
 
-    transactions = _call_openai(content, api_key)
+    transactions, truncation_warning = _call_openai(content, api_key)
 
     if not transactions:
         raise ValueError("IA não encontrou transações no arquivo.")
@@ -157,6 +182,10 @@ def extract_with_ai(filepath: Path, api_key: str) -> list[dict]:
             "valor":     parsed_val,
         })
 
+    if truncation_warning and result:
+        import warnings
+        warnings.warn(truncation_warning, AITruncationWarning, stacklevel=2)
+
     return result
 
 
@@ -180,7 +209,7 @@ def classify_transactions(
     memory_rules = {"DESPESAS": {"desc": "Cat"}, "RECEITAS": {"desc": "Cat"}}
     Adds "classificacao" key to each row (empty string if no match).
     """
-    if not _OPENAI_AVAILABLE or not rows:
+    if not _OPENAI_AVAILABLE or not rows or not api_key or not api_key.strip():
         for row in rows:
             row.setdefault("classificacao", "")
         return rows
@@ -238,8 +267,16 @@ def classify_transactions(
             ],
             temperature=0,
             response_format={"type": "json_object"},
+            timeout=180,
         )
-        data = json.loads(response.choices[0].message.content)
+        raw = response.choices[0].message.content
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            print(f"[CLASSIFY WARNING] OpenAI retornou JSON inválido: {raw[:300]}")
+            for row in rows:
+                row.setdefault("classificacao", "")
+            return rows
         index_map = {
             item["index"]: item.get("classificacao", "")
             for item in data.get("classifications", [])

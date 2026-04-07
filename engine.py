@@ -4,6 +4,7 @@ No GUI dependencies; can be used standalone or tested independently.
 """
 
 from __future__ import annotations
+import json
 import re
 from pathlib import Path
 from datetime import datetime, date
@@ -11,14 +12,24 @@ import openpyxl
 from openpyxl import load_workbook
 
 # ─── Google Sheets target ────────────────────────────────────────────────────
-# ─── Google Sheets target ────────────────────────────────────────────────────
-GDRIVE_DRE_ID = "1nfETgiPN5pNrcIDDiklG5yptL6ltyE8kYOfUbjRl2zM"
-GDRIVE_MEMORY_ID = "1jwkR_PEFWqDJYzIWb1wh5joUejL3t_mRXrLb9bBg8m4"
-CREDENTIALS_FILE = Path(__file__).parent / "spreadsheetexport-490117-f905b0cadf9e.json"
+_CONFIG_FILE = Path(__file__).parent / "config.json"
+
+def _load_engine_config() -> dict:
+    try:
+        return json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+_cfg = _load_engine_config()
+GDRIVE_DRE_ID = _cfg.get("dre_spreadsheet_id", "")
+GDRIVE_MEMORY_ID = _cfg.get("memory_spreadsheet_id", "1jwkR_PEFWqDJYzIWb1wh5joUejL3t_mRXrLb9bBg8m4")
+CREDENTIALS_FILE = Path(
+    _cfg.get("credentials_file", str(Path(__file__).parent / "spreadsheetexport-490117-f905b0cadf9e.json"))
+)
 GSHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
-class ImportError(Exception):
+class DREImportError(Exception):
     pass
 
 
@@ -35,12 +46,18 @@ def detect_source_type(filepath: Path) -> str:
 
     try:
         wb = load_workbook(filepath, read_only=True, data_only=True)
-        sheet_names = [s.lower() for s in wb.sheetnames]
-        first_sheet = wb.worksheets[0]
-        rows = list(first_sheet.iter_rows(max_row=4, values_only=True))
-        wb.close()
     except Exception:
         return "ai"
+    try:
+        sheet_names = [s.lower() for s in wb.sheetnames]
+        if not wb.worksheets:
+            return "ai"
+        first_sheet = wb.worksheets[0]
+        rows = list(first_sheet.iter_rows(max_row=4, values_only=True))
+    except Exception:
+        return "ai"
+    finally:
+        wb.close()
 
     # Cartão: sheet name contains 'nu_' or headers are Data/Valor/Identificador/Descrição
     for name in sheet_names:
@@ -67,7 +84,7 @@ def detect_source_type(filepath: Path) -> str:
     if "histórico" in cell_text and "documento" in cell_text and "saldo" in cell_text:
         return "caixa"
 
-    if "favorecido" in cell_text or "tipo" in cell_text and "saída" in cell_text.replace("í","i"):
+    if "favorecido" in cell_text or ("tipo" in cell_text and "saída" in cell_text.replace("í","i")):
         return "bradesco"
 
     if "consolidação" in cell_text or "consolidacao" in cell_text:
@@ -93,7 +110,7 @@ def _parse_value(val) -> float | None:
         # Remove currency symbols and spaces, normalize decimal separator
         cleaned = val.strip().replace("R$", "").replace(" ", "")
         # Brazilian format: 1.234,56 → 1234.56
-        if re.search(r"\d\.\d{3},\d{2}", cleaned):
+        if re.search(r"\d{1,3}(\.\d{3})+,\d{2}", cleaned):
             cleaned = cleaned.replace(".", "").replace(",", ".")
         else:
             cleaned = cleaned.replace(",", ".")
@@ -144,12 +161,14 @@ def _col_index(header_row: tuple, keyword: str) -> int | None:
 
 def extract_cartao(filepath: Path, sheet_target: str) -> list[dict]:
     wb = load_workbook(filepath, data_only=True)
-    ws = wb.worksheets[0]
-    rows = list(ws.iter_rows(values_only=True))
-    wb.close()
+    try:
+        ws = wb.worksheets[0]
+        rows = list(ws.iter_rows(values_only=True))
+    finally:
+        wb.close()
 
     if not rows:
-        raise ImportError("Arquivo do Cartão está vazio.")
+        raise DREImportError("Arquivo do Cartão está vazio.")
 
     # Header: Data | Valor | Identificador | Descrição
     header = rows[0]
@@ -158,11 +177,14 @@ def extract_cartao(filepath: Path, sheet_target: str) -> list[dict]:
     col_descr  = _col_index(header, "Descrição")
 
     if None in (col_data, col_valor, col_descr):
-        raise ImportError(f"Cabeçalhos esperados não encontrados no Cartão.\nEncontrado: {header}")
+        raise DREImportError(f"Cabeçalhos esperados não encontrados no Cartão.\nEncontrado: {header}")
 
+    max_col = max(col_data, col_valor, col_descr)
     result = []
     for row in rows[1:]:
         if not any(row):
+            continue
+        if len(row) <= max_col:
             continue
         data  = _parse_date(row[col_data])
         valor = _parse_value(row[col_valor])
@@ -184,14 +206,12 @@ def extract_cartao(filepath: Path, sheet_target: str) -> list[dict]:
 
 def extract_caixa(filepath: Path, sheet_target: str) -> list[dict]:
     wb = load_workbook(filepath, data_only=True)
-    ws = wb.worksheets[0]
-    rows = list(ws.iter_rows(values_only=True))
-    wb.close()
+    try:
+        ws = wb.worksheets[0]
+        rows = list(ws.iter_rows(values_only=True))
+    finally:
+        wb.close()
 
-    # Caixa has account info on row 0; header on row 1
-    header_idx = _find_header_row(ws if False else type("_", (), {"iter_rows": lambda *a, **k: iter(rows)})(),
-                                   ["Data", "Histórico", "Valor"])
-    # simpler: scan manually
     header_idx = None
     for i, row in enumerate(rows):
         row_text = " ".join(str(c) for c in row if c)
@@ -200,7 +220,7 @@ def extract_caixa(filepath: Path, sheet_target: str) -> list[dict]:
             break
 
     if header_idx is None:
-        raise ImportError("Cabeçalho não encontrado no arquivo da Caixa PJ.")
+        raise DREImportError("Cabeçalho não encontrado no arquivo da Caixa PJ.")
 
     header = rows[header_idx]
     col_data    = _col_index(header, "Data")
@@ -208,11 +228,14 @@ def extract_caixa(filepath: Path, sheet_target: str) -> list[dict]:
     col_valor   = _col_index(header, "Valor")
 
     if None in (col_data, col_hist, col_valor):
-        raise ImportError(f"Cabeçalhos esperados não encontrados na Caixa PJ.\nEncontrado: {header}")
+        raise DREImportError(f"Cabeçalhos esperados não encontrados na Caixa PJ.\nEncontrado: {header}")
 
+    max_col = max(col_data, col_hist, col_valor)
     result = []
     for row in rows[header_idx + 1:]:
         if not any(row):
+            continue
+        if len(row) <= max_col:
             continue
         data  = _parse_date(row[col_data])
         valor = _parse_value(row[col_valor])
@@ -234,9 +257,11 @@ def extract_caixa(filepath: Path, sheet_target: str) -> list[dict]:
 
 def extract_bradesco(filepath: Path, sheet_target: str) -> list[dict]:
     wb = load_workbook(filepath, data_only=True)
-    ws = wb.worksheets[0]
-    rows = list(ws.iter_rows(values_only=True))
-    wb.close()
+    try:
+        ws = wb.worksheets[0]
+        rows = list(ws.iter_rows(values_only=True))
+    finally:
+        wb.close()
 
     # Find header row
     header_idx = None
@@ -247,7 +272,7 @@ def extract_bradesco(filepath: Path, sheet_target: str) -> list[dict]:
             break
 
     if header_idx is None:
-        raise ImportError("Cabeçalho não encontrado no arquivo do Bradesco.")
+        raise DREImportError("Cabeçalho não encontrado no arquivo do Bradesco.")
 
     header = rows[header_idx]
     col_data    = 0  # first column is always date (unlabeled in Bradesco)
@@ -257,25 +282,29 @@ def extract_bradesco(filepath: Path, sheet_target: str) -> list[dict]:
     col_tipo    = _col_index(header, "Tipo")
 
     if None in (col_descr, col_valor):
-        raise ImportError(f"Cabeçalhos esperados não encontrados no Bradesco.\nEncontrado: {header}")
+        raise DREImportError(f"Cabeçalhos esperados não encontrados no Bradesco.\nEncontrado: {header}")
 
     auto_mode = sheet_target == "Auto (Tipo)"
+    # Minimum required columns for bounds check
+    min_required = max(col_data, col_descr, col_valor)
 
     result = []
     for row in rows[header_idx + 1:]:
         if not any(row):
             continue
+        if len(row) <= min_required:
+            continue
         data  = _parse_date(row[col_data])
         valor = _parse_value(row[col_valor])
         descr = str(row[col_descr]).strip() if row[col_descr] else ""
-        favor = str(row[col_favor]).strip() if col_favor is not None and row[col_favor] else ""
-        tipo  = str(row[col_tipo]).strip() if col_tipo is not None and row[col_tipo] else ""
+        favor = str(row[col_favor]).strip() if col_favor is not None and col_favor < len(row) and row[col_favor] else ""
+        tipo  = str(row[col_tipo]).strip() if col_tipo is not None and col_tipo < len(row) and row[col_tipo] else ""
 
         if data is None or valor is None or not descr:
             continue
 
         # Build historico: "Descrição - Favorecido/Origem"
-        historico = f"{descr} - {favor}" if favor and favor not in ("None", "") else descr
+        historico = f"{descr} - {favor}" if favor and favor.strip() else descr
 
         # Determine destination sheet
         if auto_mode:
@@ -302,7 +331,17 @@ def extract_bradesco(filepath: Path, sheet_target: str) -> list[dict]:
 
 # ─────────────────────────── MAIN ENGINE ─────────────────────────────────────
 
+def _sanitize_cell(val: str) -> str:
+    """Prevent spreadsheet formula injection by prefixing dangerous characters."""
+    if val and isinstance(val, str) and val[0] in ('=', '+', '-', '@', '\t', '\r'):
+        return "'" + val
+    return val
+
+
 class DREEngine:
+
+    def __init__(self, dre_id: str | None = None):
+        self.dre_id = dre_id or GDRIVE_DRE_ID
 
     def extract_rows(
         self,
@@ -320,14 +359,14 @@ class DREEngine:
             rows = extract_bradesco(filepath, sheet_target)
         elif source_type == "ai":
             if not api_key:
-                raise ImportError(
+                raise DREImportError(
                     f"Arquivo '{filepath.name}' requer análise de IA.\n"
                     "Informe a OpenAI API Key no campo acima."
                 )
             from ai_mapper import extract_with_ai
             rows = extract_with_ai(filepath, api_key)
         else:
-            raise ImportError(
+            raise DREImportError(
                 f"Tipo de arquivo não reconhecido: {filepath.name}\n"
                 "Formatos suportados: Cartão PagVeloz, Caixa PJ, Bradesco, PDF (via IA)."
             )
@@ -352,7 +391,7 @@ class DREEngine:
 
         try:
             gc = gspread.service_account(filename=str(CREDENTIALS_FILE))
-            sh = gc.open_by_key(GDRIVE_DRE_ID)
+            sh = gc.open_by_key(self.dre_id)
             lista = sh.worksheet("*Lista*")
 
             # Column B → DESPESAS categories (row 2 onwards; row 1 is header)
@@ -445,13 +484,13 @@ class DREEngine:
         try:
             import gspread
         except ImportError:
-            raise ImportError(
+            raise DREImportError(
                 "Pacotes necessários não instalados.\n"
                 "Execute: pip install gspread google-auth"
             )
 
         if not CREDENTIALS_FILE.exists():
-            raise ImportError(
+            raise DREImportError(
                 f"Arquivo de credenciais não encontrado:\n{CREDENTIALS_FILE}\n\n"
                 "Coloque o arquivo credentials.json na pasta do programa."
             )
@@ -460,15 +499,15 @@ class DREEngine:
             gc = gspread.service_account(filename=str(CREDENTIALS_FILE))
         except Exception as e:
             import traceback
-            raise ImportError(
+            raise DREImportError(
                 f"Falha na autenticação com a conta de serviço.\n\n{traceback.format_exc()}"
             )
 
         try:
-            sh = gc.open_by_key(GDRIVE_DRE_ID)
+            sh = gc.open_by_key(self.dre_id)
         except Exception as e:
             import traceback
-            raise ImportError(
+            raise DREImportError(
                 f"Não foi possível abrir a planilha Google Sheets.\n"
                 f"Certifique-se de que ela foi compartilhada com a conta de serviço.\n\n"
                 f"{traceback.format_exc()}"
@@ -483,7 +522,7 @@ class DREEngine:
             try:
                 ws = sh.worksheet(sheet_name)
             except Exception:
-                raise ImportError(f"Aba '{sheet_name}' não encontrada na planilha DRE.")
+                raise DREImportError(f"Aba '{sheet_name}' não encontrada na planilha DRE.")
 
             # Find last non-empty row in column A specifically
             col_a = ws.col_values(1)
@@ -505,7 +544,7 @@ class DREEngine:
             values = []
             for r in sheet_rows:
                 date_str = r["data"].strftime("%d/%m/%Y") if hasattr(r["data"], "strftime") else str(r["data"])
-                values.append([date_str, r["historico"], r.get("classificacao", ""), r["valor"]])
+                values.append([date_str, _sanitize_cell(r["historico"]), _sanitize_cell(r.get("classificacao", "")), r["valor"]])
 
             ws.update(
                 range_name=f"A{first_target_row}:D{target_last}",

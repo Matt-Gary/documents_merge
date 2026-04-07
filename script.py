@@ -8,7 +8,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
-from engine import DREEngine, detect_source_type, ImportError
+import re as _re
+from engine import DREEngine, detect_source_type, DREImportError, CREDENTIALS_FILE
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
 DOTENV_FILE = Path(__file__).parent / ".env"
@@ -235,7 +236,8 @@ class PreviewTable(tk.Frame):
             lambda e: canvas.itemconfig(canvas.find_withtag("all")[0], width=e.width) if canvas.find_withtag("all") else None,
         )
 
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        self.body.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
 
     def load(self, rows: list[dict], categories: dict = None):
         self.combos = []
@@ -328,8 +330,17 @@ class App(tk.Tk):
 
         cfg = _load_config()
         dotenv = _read_dotenv()
-        # .env OPENAI_KEY takes priority over saved config
-        self._api_key: str = dotenv.get("OPENAI_API") or cfg.get("openai_api_key", "")
+        self._api_key: str = dotenv.get("OPENAI_API", "")
+        self._dre_id: str = cfg.get("dre_spreadsheet_id", "")
+
+        # Target email for Google Sheets sharing
+        self._target_email = ""
+        try:
+            if CREDENTIALS_FILE.exists():
+                creds = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
+                self._target_email = creds.get("client_email", "")
+        except Exception:
+            pass
 
         self._build_ui()
 
@@ -359,47 +370,7 @@ class App(tk.Tk):
         left.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 8))
         left.rowconfigure(2, weight=1)
 
-        # ── OpenAI API Key ──
-        tk.Label(left, text="OpenAI API Key", bg=BG, fg=TEXT,
-                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
-
-        api_card = tk.Frame(left, bg=CARD, relief="flat", bd=1,
-                            highlightbackground=BORDER, highlightthickness=1)
-        api_card.pack(fill="x", pady=(0, 12))
-
-        self._api_key_var = tk.StringVar(value=self._api_key)
-        api_entry = tk.Entry(
-            api_card,
-            textvariable=self._api_key_var,
-            font=("Segoe UI", 9),
-            bg=CARD, fg=TEXT,
-            relief="flat",
-            show="*",
-        )
-        api_entry.pack(side="left", fill="x", expand=True, padx=(10, 4), pady=6)
-
-        self._show_key_var = tk.BooleanVar(value=False)
-
-        def _toggle_show():
-            api_entry.config(show="" if self._show_key_var.get() else "*")
-
-        tk.Checkbutton(
-            api_card, text="mostrar", variable=self._show_key_var,
-            command=_toggle_show,
-            bg=CARD, fg=SUBTEXT, font=("Segoe UI", 8),
-            activebackground=CARD, bd=0, cursor="hand2",
-        ).pack(side="left", padx=(0, 4))
-
-        tk.Button(
-            api_card, text="Salvar",
-            command=self._save_api_key,
-            bg=PRIMARY, fg="white", bd=0,
-            font=("Segoe UI", 8, "bold"),
-            padx=8, pady=4, cursor="hand2",
-            activebackground=PRIMARY_DK, activeforeground="white",
-        ).pack(side="right", padx=(0, 8), pady=4)
-
-        # ── DRE target (Google Sheets — fixed) ──
+        # ── DRE target (Google Sheets — editable) ──
         tk.Label(left, text="1. Planilha DRE (destino)", bg=BG, fg=TEXT,
                  font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 4))
 
@@ -409,19 +380,33 @@ class App(tk.Tk):
 
         tk.Label(
             dre_card,
-            text="📄  Google Sheets — DRE Fechamento",
-            bg="#EFF6FF", fg=PRIMARY,
-            font=("Segoe UI", 9, "bold"),
-            anchor="w", padx=10, pady=10,
-        ).pack(fill="x")
-
-        tk.Label(
-            dre_card,
-            text="Os lançamentos serão enviados diretamente ao Google Drive.",
+            text="Cole o link da planilha Google Sheets:",
             bg=CARD, fg=SUBTEXT,
             font=("Segoe UI", 8),
             anchor="w", padx=10,
-        ).pack(fill="x", pady=(0, 8))
+        ).pack(fill="x", pady=(8, 2))
+
+        dre_input_frame = tk.Frame(dre_card, bg=CARD)
+        dre_input_frame.pack(fill="x", padx=8, pady=(0, 8))
+
+        self._dre_url_var = tk.StringVar(value=self._dre_id)
+        dre_entry = tk.Entry(
+            dre_input_frame,
+            textvariable=self._dre_url_var,
+            font=("Segoe UI", 9),
+            bg=CARD, fg=TEXT,
+            relief="flat",
+        )
+        dre_entry.pack(side="left", fill="x", expand=True, padx=(2, 4), pady=4)
+
+        tk.Button(
+            dre_input_frame, text="Salvar",
+            command=self._save_dre_target,
+            bg=PRIMARY, fg="white", bd=0,
+            font=("Segoe UI", 8, "bold"),
+            padx=8, pady=4, cursor="hand2",
+            activebackground=PRIMARY_DK, activeforeground="white",
+        ).pack(side="right", pady=4)
 
         # Source files
         tk.Label(left, text="2. Arquivos de lançamentos", bg=BG, fg=TEXT,
@@ -509,13 +494,105 @@ class App(tk.Tk):
 
     # ─────────────────────────────── ACTIONS ─────────────────────────────────
 
-    def _save_api_key(self):
-        key = self._api_key_var.get().strip()
-        self._api_key = key
+    def _save_dre_target(self):
+        raw = self._dre_url_var.get().strip()
+
+        # Check if user pasted an xlsx/xlsm file path
+        if raw.lower().endswith((".xlsx", ".xlsm", ".xls")):
+            messagebox.showwarning(
+                "Formato inválido",
+                "O destino deve ser uma planilha Google Sheets, não um arquivo Excel local.\n\n"
+                "Faça upload do arquivo para o Google Drive e cole o link aqui.",
+            )
+            return
+
+        # Extract spreadsheet ID from a Google Sheets URL
+        m = _re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", raw)
+        dre_id = m.group(1) if m else raw  # allow pasting raw ID too
+
+        if not dre_id:
+            self._set_status("Informe o link ou ID da planilha DRE.", color=DANGER)
+            return
+
+        self._dre_id = dre_id
+        self._dre_url_var.set(dre_id)
         cfg = _load_config()
-        cfg["openai_api_key"] = key
+        cfg["dre_spreadsheet_id"] = dre_id
         _save_config(cfg)
-        self._set_status("API Key salva." if key else "API Key removida.")
+        self._set_status("Planilha DRE salva.")
+
+        if self._target_email:
+            self._show_sharing_prompt()
+
+    def _show_sharing_prompt(self):
+        """Custom popup to remind user to share the spreadsheet."""
+        win = tk.Toplevel(self)
+        win.title("Compartilhar Planilha")
+        win.geometry("460x280")
+        win.resizable(False, False)
+        win.configure(bg=CARD)
+        win.transient(self)
+        win.grab_set()
+
+        # center popup
+        win.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() // 2) - (win.winfo_width() // 2)
+        y = self.winfo_y() + (self.winfo_height() // 2) - (win.winfo_height() // 2)
+        win.geometry(f"+{x}+{y}")
+
+        content = tk.Frame(win, bg=CARD, padx=20, pady=20)
+        content.pack(fill="both", expand=True)
+
+        tk.Label(
+            content, text="📋  Ação necessária!",
+            bg=CARD, fg=PRIMARY, font=("Segoe UI", 12, "bold")
+        ).pack(pady=(0, 10))
+
+        tk.Label(
+            content,
+            text="Para que o programa consiga enviar os dados, você precisa\n"
+                 "compartilhar a sua nova planilha com o e-mail abaixo:",
+            bg=CARD, fg=TEXT, font=("Segoe UI", 10),
+            justify="center",
+        ).pack(pady=(0, 15))
+
+        email_frame = tk.Frame(content, bg="#F3F4F6", padx=10, pady=10)
+        email_frame.pack(fill="x", pady=(0, 15))
+
+        email_label = tk.Label(
+            email_frame, text=self._target_email,
+            bg="#F3F4F6", fg=TEXT, font=("Consolas", 10, "bold"),
+            wraplength=400,
+        )
+        email_label.pack()
+
+        def _copy():
+            self.clipboard_clear()
+            self.clipboard_append(self._target_email)
+            copy_btn.config(text="Copiado!", state="disabled")
+            self.after(2000, lambda: copy_btn.config(text="Copiar E-mail", state="normal"))
+
+        btn_frame = tk.Frame(content, bg=CARD)
+        btn_frame.pack()
+
+        copy_btn = tk.Button(
+            btn_frame, text="Copiar E-mail",
+            command=_copy,
+            bg=PRIMARY, fg="white", bd=0,
+            font=("Segoe UI", 9, "bold"),
+            padx=16, pady=8, cursor="hand2",
+            activebackground=PRIMARY_DK, activeforeground="white"
+        )
+        copy_btn.pack(side="left", padx=5)
+
+        tk.Button(
+            btn_frame, text="Entendi",
+            command=win.destroy,
+            bg=BG, fg=TEXT, bd=0,
+            font=("Segoe UI", 9),
+            padx=16, pady=8, cursor="hand2",
+            activebackground=BORDER
+        ).pack(side="left", padx=5)
 
     def _add_files(self):
         paths = filedialog.askopenfilenames(
@@ -558,21 +635,32 @@ class App(tk.Tk):
         files_info = []
         for row in self.file_rows:
             files_info.append((row.filepath, row.source_type, row.sheet_var.get()))
-        api_key = self._api_key_var.get().strip() or self._api_key
+        api_key = self._api_key
 
         self._set_status("⏳  Analisando arquivos... aguarde.", color=WARNING)
         self.count_label.config(text="(processando...)")
 
+        dre_id = self._dre_id
+
         def run():
             try:
-                engine = DREEngine()
+                import warnings
+                from ai_mapper import AITruncationWarning
+                engine = DREEngine(dre_id=dre_id)
                 all_rows = []
+                trunc_warnings = []
                 for filepath, source_type, sheet_target in files_info:
-                    rows = engine.extract_rows(
-                        filepath, source_type, sheet_target, api_key=api_key
-                    )
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter("always", AITruncationWarning)
+                        rows = engine.extract_rows(
+                            filepath, source_type, sheet_target, api_key=api_key
+                        )
+                    for w in caught:
+                        if issubclass(w.category, AITruncationWarning):
+                            trunc_warnings.append(f"{filepath.name}: {w.message}")
                     all_rows.extend(rows)
-                
+
+                categories = {}
                 if all_rows:
                     self.after(0, lambda: self._set_status("🏷️  Classificando lançamentos com IA...", color=PRIMARY))
                     categories = engine.fetch_categories()
@@ -580,7 +668,10 @@ class App(tk.Tk):
                     from ai_mapper import classify_transactions
                     all_rows = classify_transactions(all_rows, categories, memory, api_key)
 
-                self.after(0, lambda r=all_rows, c=categories if all_rows else {}: self._on_preview_success(r, c))
+                self.after(0, lambda r=all_rows, c=categories: self._on_preview_success(r, c))
+                if trunc_warnings:
+                    warn_msg = "Atenção — conteúdo truncado:\n\n" + "\n".join(trunc_warnings)
+                    self.after(0, lambda: messagebox.showwarning("Aviso de truncamento", warn_msg))
             except Exception as e:
                 msg = str(e)
                 self.after(0, lambda: self._on_preview_error(msg))
@@ -627,9 +718,11 @@ class App(tk.Tk):
             if new_cat and new_cat != old_cat:
                 rules_to_save.append((r["historico"], new_cat, r["sheet"]))
 
+        dre_id = self._dre_id
+
         def run():
             try:
-                engine = DREEngine()
+                engine = DREEngine(dre_id=dre_id)
                 inserted = engine.write_to_dre(self.preview_data)
                 
                 # Save learned rules (run sequentially since write_to_dre finished successfully)
